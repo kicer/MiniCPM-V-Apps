@@ -136,8 +136,13 @@ class LlamaEngine private constructor(
             prefs(context).edit().putBoolean(KEY_ENABLE_THINKING, enable).apply()
         }
 
+        // Models live in the app-specific EXTERNAL dir
+        // (/sdcard/Android/data/<pkg>/files/models) so they can be managed
+        // directly via adb push / file managers that can reach Android/data,
+        // matching the README's "sideload via adb" workflow.  Falls back to
+        // internal storage only if no external volume is mounted.
         fun modelDir(context: Context): String =
-            File(context.filesDir, MODEL_SUBDIR).absolutePath
+            File(context.getExternalFilesDir(null) ?: context.filesDir, MODEL_SUBDIR).absolutePath
 
         fun modelDirFor(context: Context, model: ModelInfo): String =
             File(modelDir(context), model.id).absolutePath
