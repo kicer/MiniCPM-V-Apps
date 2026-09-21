@@ -177,6 +177,10 @@
     <string name="tts_record_permission_denied">需要麦克风权限才能录制参考音频</string>
     <string name="tts_download_prompt_title">缺少模型文件</string>
     <string name="tts_download_prompt_message">请先下载 VoxCPM2 模型</string>
+
+    <!-- llm-relay 生产端状态 -->
+    <string name="relay_status_connected">relay 已连接</string>
+    <string name="relay_status_connecting">relay 连接中</string>
     <string name="tts_model_load_failed">模型加载失败</string>
     <string name="tts_preset_load_failed">加载预设失败: %1$s</string>
     <string name="tts_baselm_missing">BaseLM GGUF 文件不存在，请下载模型</string>

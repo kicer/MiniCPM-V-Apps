@@ -15,6 +15,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -25,6 +26,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.appbar.AppBarLayout
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputEditText
+import kotlinx.coroutines.sync.withLock
 import io.noties.markwon.Markwon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cardInputBar: View
     private lateinit var appBarLayout: AppBarLayout
     private lateinit var tvTitle: TextView
+    private lateinit var tvRelayStatus: TextView
 
     private lateinit var engine: LlamaEngine
     private var generationJob: Job? = null
@@ -98,6 +101,7 @@ class MainActivity : AppCompatActivity() {
         initViews()
         setupRecyclerView()
         setupClickListeners()
+        observeRelayStatus()
         initEngine()
     }
 
@@ -113,6 +117,7 @@ class MainActivity : AppCompatActivity() {
         cardInputBar = findViewById(R.id.card_input_bar)
         appBarLayout = findViewById(R.id.appBarLayout)
         tvTitle = findViewById(R.id.tv_title)
+        tvRelayStatus = findViewById(R.id.tv_relay_status)
     }
 
     private fun setupRecyclerView() {
@@ -256,7 +261,7 @@ class MainActivity : AppCompatActivity() {
     private fun clearChat() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                engine.clearContext()
+                engine.inferenceMutex.withLock { engine.clearContext() }
                 withContext(Dispatchers.Main) {
                     clearChatUI()
                     Toast.makeText(this@MainActivity, R.string.clear_chat_toast, Toast.LENGTH_SHORT).show()
@@ -302,6 +307,8 @@ class MainActivity : AppCompatActivity() {
                         loadedModelId = LlamaEngine.getSelectedModel(applicationContext).id
                         enableInput(true)
                         updateUIForModelType()
+                        // 模型就绪 -> 连上 llm-relay 充当大模型生产端。
+                        RelayClient.start(applicationContext, engine)
                     }
                     is LlamaState.ProcessingSystemPrompt,
                     is LlamaState.ProcessingUserPrompt,
@@ -315,9 +322,12 @@ class MainActivity : AppCompatActivity() {
                         btnImage.isEnabled = false
                     }
                     is LlamaState.UnloadingModel -> {
+                        // 模型即将卸载，先断开 relay，避免服务器继续往本设备派单。
+                        RelayClient.stop()
                         enableInput(false)
                     }
                     is LlamaState.Error -> {
+                        RelayClient.stop()
                         enableInput(false)
                     }
                 }
@@ -360,6 +370,30 @@ class MainActivity : AppCompatActivity() {
         val on = LlamaEngine.getEnableThinking(this)
         btnThink.isChecked = on
         btnThink.alpha = if (on) 1f else 0.7f
+    }
+
+    /** 工具栏左侧的 llm-relay 连接状态小标签。 */
+    private fun observeRelayStatus() {
+        lifecycleScope.launch {
+            RelayClient.status.collect { s ->
+                when (s) {
+                    RelayClient.Status.Connected -> {
+                        tvRelayStatus.visibility = View.VISIBLE
+                        tvRelayStatus.setText(R.string.relay_status_connected)
+                        tvRelayStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.relay_ok))
+                    }
+                    RelayClient.Status.Connecting,
+                    RelayClient.Status.Reconnecting -> {
+                        tvRelayStatus.visibility = View.VISIBLE
+                        tvRelayStatus.setText(R.string.relay_status_connecting)
+                        tvRelayStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.relay_warn))
+                    }
+                    RelayClient.Status.Disconnected -> {
+                        tvRelayStatus.visibility = View.GONE
+                    }
+                }
+            }
+        }
     }
 
     private fun refreshWelcomeCard(isTextOnly: Boolean) {
@@ -646,6 +680,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         generationJob = lifecycleScope.launch(Dispatchers.Default) {
+            // 与 llm-relay 的远端推理共享单 llama context：整轮生成都要持锁。
+            engine.inferenceMutex.withLock {
             val fullResponse = StringBuilder()
             engine.sendUserPrompt(userMsg)
                 .onCompletion {
@@ -680,6 +716,7 @@ class MainActivity : AppCompatActivity() {
                         scrollToBottom()
                     }
                 }
+            }
         }
     }
 
@@ -752,6 +789,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         if (isFinishing && !isLocaleRestart && ::engine.isInitialized) {
+            RelayClient.stop()
             engine.destroy()
         }
         super.onDestroy()

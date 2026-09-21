@@ -1,0 +1,78 @@
+name: Android Build
+
+# Builds the installable debug APK (incl. the arm64 native llama.cpp-omni libs)
+# whenever the Android app or its native backend changes, and on demand.
+# Download the artefact from the run's "Summary" page and install it on a
+# 64-bit ARM device: adb install MiniCPM-V-demo-Android-vX.Y-debug.apk
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'MiniCPM-V-demo-Android/**'
+      - 'llama.cpp-omni'
+      - '.gitmodules'
+      - '.github/workflows/android-build.yml'
+  pull_request:
+    paths:
+      - 'MiniCPM-V-demo-Android/**'
+      - 'llama.cpp-omni'
+      - '.gitmodules'
+      - '.github/workflows/android-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (with llama.cpp-omni submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install NDK / CMake / platform SDK
+        run: |
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          # Versions pinned in app/build.gradle.kts (NDK 27.0.12077973, CMake 4.1.2);
+          # the buildGgmlCpu_v86 task hard-codes these exact SDK paths.
+          "$SDKMGR" "ndk;27.0.12077973" "cmake;4.1.2"
+          # compileSdk is minor-API 36.1; if that package name is not offered,
+          # fall back and let AGP's auto-provisioning (licenses accepted above)
+          # fetch whatever compileSdk actually resolves to.
+          "$SDKMGR" "platforms;android-36.1" 2>/dev/null \
+            || "$SDKMGR" "platforms;android-36" 2>/dev/null \
+            || true
+
+      - name: Assemble debug APK
+        working-directory: MiniCPM-V-demo-Android
+        run: ./gradlew --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Package APK
+        working-directory: MiniCPM-V-demo-Android
+        id: pkg
+        run: |
+          VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)"
+          echo "versionName=$VERSION" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/apk"
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "$RUNNER_TEMP/apk/MiniCPM-V-demo-Android-v${VERSION}-debug.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniCPM-V-demo-Android-v${{ steps.pkg.outputs.versionName }}-debug
+          path: ${{ runner.temp }}/apk/MiniCPM-V-demo-Android-v${{ steps.pkg.outputs.versionName }}-debug.apk
+          if-no-files-found: error

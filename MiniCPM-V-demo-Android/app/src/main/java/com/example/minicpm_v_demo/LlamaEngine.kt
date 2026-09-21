@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -1028,6 +1030,16 @@ class LlamaEngine private constructor(
         Log.i(TAG, "enable_thinking=$enable")
     }
 
+    /**
+     * Serialises *whole* inference turns (clear-context + system prompt +
+     * user prompt + generation) across concurrent producers of the single
+     * llama context: the chat UI and the llm-relay WebSocket client
+     * ([RelayClient]).  Partial token streams interleaving two callers
+     * would corrupt both conversations, so holders must keep the lock for
+     * the entire generated reply.
+     */
+    val inferenceMutex = Mutex()
+
     suspend fun setSystemPrompt(prompt: String) =
         withContext(llamaDispatcher) {
             require(prompt.isNotBlank()) { "Cannot process empty system prompt!" }
@@ -1213,15 +1225,17 @@ class LlamaEngine private constructor(
         }
     }
 
-    suspend fun unloadModel() = withContext(llamaDispatcher) {
-        if (_state.value is LlamaState.ModelReady) {
-            Log.i(TAG, "Unloading model...")
-            _readyForSystemPrompt = false
-            _mmprojLoaded = false
-            _state.value = LlamaState.UnloadingModel
-            unload()
-            _state.value = LlamaState.Initialized
-            Log.i(TAG, "Model unloaded")
+    suspend fun unloadModel() = inferenceMutex.withLock {
+        withContext(llamaDispatcher) {
+            if (_state.value is LlamaState.ModelReady) {
+                Log.i(TAG, "Unloading model...")
+                _readyForSystemPrompt = false
+                _mmprojLoaded = false
+                _state.value = LlamaState.UnloadingModel
+                unload()
+                _state.value = LlamaState.Initialized
+                Log.i(TAG, "Model unloaded")
+            }
         }
     }
 
@@ -1234,36 +1248,44 @@ class LlamaEngine private constructor(
 
     fun cleanUp() {
         _cancelGeneration = true
-        runBlocking(llamaDispatcher) {
-            when (val state = _state.value) {
-                is LlamaState.ModelReady -> {
-                    Log.i(TAG, "Unloading model and free resources...")
-                    _readyForSystemPrompt = false
-                    _mmprojLoaded = false
-                    _state.value = LlamaState.UnloadingModel
-                    unload()
-                    _state.value = LlamaState.Initialized
-                    Log.i(TAG, "Model unloaded!")
+        runBlocking {
+            inferenceMutex.withLock {
+                runBlocking(llamaDispatcher) {
+                    when (val state = _state.value) {
+                        is LlamaState.ModelReady -> {
+                            Log.i(TAG, "Unloading model and free resources...")
+                            _readyForSystemPrompt = false
+                            _mmprojLoaded = false
+                            _state.value = LlamaState.UnloadingModel
+                            unload()
+                            _state.value = LlamaState.Initialized
+                            Log.i(TAG, "Model unloaded!")
+                        }
+                        is LlamaState.Error -> {
+                            Log.i(TAG, "Resetting error states...")
+                            _mmprojLoaded = false
+                            _state.value = LlamaState.Initialized
+                        }
+                        else -> throw IllegalStateException("Cannot unload model in ${state.javaClass.simpleName}")
+                    }
                 }
-                is LlamaState.Error -> {
-                    Log.i(TAG, "Resetting error states...")
-                    _mmprojLoaded = false
-                    _state.value = LlamaState.Initialized
-                }
-                else -> throw IllegalStateException("Cannot unload model in ${state.javaClass.simpleName}")
             }
         }
     }
 
     fun destroy() {
         _cancelGeneration = true
-        runBlocking(llamaDispatcher) {
-            _readyForSystemPrompt = false
-            _mmprojLoaded = false
-            when (_state.value) {
-                is LlamaState.Uninitialized -> {}
-                is LlamaState.Initialized -> shutdown()
-                else -> { unload(); shutdown() }
+        runBlocking {
+            inferenceMutex.withLock {
+                runBlocking(llamaDispatcher) {
+                    _readyForSystemPrompt = false
+                    _mmprojLoaded = false
+                    when (_state.value) {
+                        is LlamaState.Uninitialized -> {}
+                        is LlamaState.Initialized -> shutdown()
+                        else -> { unload(); shutdown() }
+                    }
+                }
             }
         }
         llamaScope.cancel()

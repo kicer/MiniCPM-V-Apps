@@ -131,6 +131,26 @@ cd MiniCPM-V-demo-Android
 
 首次启动时，应用会自动把 GGUF 模型文件下载到外部存储。也可以通过 `adb push` 手动侧载模型文件——具体目录结构请参考 App 内的 **模型管理** 页面。
 
+#### llm-relay 模式（端侧推理生产端）
+
+Android Demo 在模型加载完成后，会自动与 llm-relay 中转服务器
+`wss://llm-relay.ai.foresh.com/ws`（常量 `RelayClient.RELAY_WS_URL`）建立
+WebSocket 长连接：手机上报设备 ID 与当前模型名完成注册，接收服务器转发的
+OpenAI 格式 `inference` 请求，在端侧完成推理并以 `chunk` 流式回传原始文本，
+MiniCPM5 的 XML 工具调用由服务器解析为标准 `tool_calls`。顶栏会显示
+「relay 已连接 / relay 连接中」状态角标。
+
+注意：
+
+* 每个 relay 请求都是**无状态**执行（重置上下文 + 将完整 messages 历史扁平化
+  为单条 prompt），因此也会重置聊天页的模型上下文——relay 流量结束后，本地
+  继续对话前请先点「清除对话」。
+* 连接随 App 进程存活而保持；测试期间请把 App 保持在前台（未为其启动前台服务）。
+
+仓库配置了 GitHub Actions（`.github/workflows/android-build.yml`）：凡改动
+Android 工程或 `llama.cpp-omni` 子模块指针的 push 都会自动编译 debug APK（含
+NDK 原生库），在 Actions 运行页下载即可安装测试。
+
 ### 1.3 HarmonyOS Demo
 
 环境要求：

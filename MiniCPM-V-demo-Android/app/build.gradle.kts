@@ -113,6 +113,8 @@ dependencies {
 
     // Markdown rendering for AI streaming responses (headings, bold, lists, code, etc.)
     implementation("io.noties.markwon:core:4.6.2")
+    // llm-relay producer: WebSocket client (pure Java, no transitive deps).
+    implementation("org.java-websocket:Java-WebSocket:1.5.7")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

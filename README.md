@@ -131,6 +131,30 @@ Or open `MiniCPM-V-demo-Android/` directly in Android Studio and click Run.
 
 The first launch will download the GGUF model files into the app's external storage. You can also sideload model files manually via `adb push` — see in-app **Model Manager** for the expected directory layout.
 
+#### llm-relay mode (on-device inference producer)
+
+Once a model finishes loading, the Android demo automatically opens a
+WebSocket connection to the llm-relay relay server at
+`wss://llm-relay.ai.foresh.com/ws` (constant `RelayClient.RELAY_WS_URL`). The
+phone registers itself (device id + currently loaded model name), receives
+OpenAI-style `inference` requests forwarded from H5 agents, runs them fully
+on-device, and streams raw text back as `chunk` messages; the server parses
+MiniCPM5 XML tool calls into standard `tool_calls`. The toolbar shows a
+`relay connected / relay connecting` badge.
+
+Notes:
+
+* Each relay request is executed **statelessly** (context reset + full
+  message history flattened into one prompt), so it also resets the chat
+  page's model context — tap **Clear chat** before resuming a local
+  conversation after relay traffic.
+* The connection lives while the app process is alive; keep the app in the
+  foreground during testing (no foreground service is started for it).
+
+A GitHub Actions workflow (`.github/workflows/android-build.yml`) builds the
+debug APK (NDK native libs included) on every push that touches the Android
+app or the `llama.cpp-omni` submodule; download it from the run summary.
+
 ### 1.3 HarmonyOS Demo
 
 Requirements:
