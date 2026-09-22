@@ -29,6 +29,8 @@ jobs:
   build-debug-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: write   # needed to create/update the rolling CI prerelease
     steps:
       - name: Checkout (with llama.cpp-omni submodule)
         uses: actions/checkout@v4
@@ -41,6 +43,20 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Install shared debug keystore
+        # Secret MINICPMV_DEBUG_KEYSTORE holds the base64 of a fixed Android
+        # debug keystore (alias androiddebugkey, store/key pass "android").
+        # Installing it at ~/.android/debug.keystore makes every CI build sign
+        # with the SAME key, so new APKs can be installed over old ones
+        # (adb install -r) instead of failing with INSTALL_FAILED_UPDATE_INCOMPATIBLE.
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.MINICPMV_DEBUG_KEYSTORE }}
+        if: env.DEBUG_KEYSTORE_B64 != ''
+        run: |
+          mkdir -p "$HOME/.android"
+          printf '%s' "$DEBUG_KEYSTORE_B64" | base64 -d > "$HOME/.android/debug.keystore"
+          echo "Fixed debug keystore installed (stable APK signatures)"
 
       - name: Install NDK / CMake / platform SDK
         run: |
@@ -70,9 +86,30 @@ jobs:
           cp app/build/outputs/apk/debug/app-debug.apk \
              "$RUNNER_TEMP/apk/MiniCPM-V-demo-Android-v${VERSION}-debug.apk"
 
-      - name: Upload APK
+      - name: Upload APK (workflow artefact)
         uses: actions/upload-artifact@v4
         with:
           name: MiniCPM-V-demo-Android-v${{ steps.pkg.outputs.versionName }}-debug
           path: ${{ runner.temp }}/apk/MiniCPM-V-demo-Android-v${{ steps.pkg.outputs.versionName }}-debug.apk
           if-no-files-found: error
+
+      - name: Publish APK to GitHub Release
+        # Rolling prerelease "ci-android-debug": always points at the latest
+        # main build so download links never change. Skipped on PRs/forks.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'kicer/MiniCPM-V-Apps'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-android-debug
+          name: "Android CI debug build v${{ steps.pkg.outputs.versionName }}"
+          prerelease: true
+          make_latest: "false"
+          generate_release_notes: false
+          delete_assets: true
+          fail_on_unmatched_files: true
+          body: |
+            自动构建的最新 debug APK（包含 llm-relay 端侧推理生产端）。
+            每次 push 到 main 自动更新，本页永远是最新包。
+
+            下载 `MiniCPM-V-demo-Android-v${{ steps.pkg.outputs.versionName }}-debug.apk`，`adb install -r` 即可（签名已固定，可直接覆盖安装）。
+          files: ${{ runner.temp }}/apk/MiniCPM-V-demo-Android-v*.apk
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -151,7 +151,8 @@ MiniCPM5 的 XML 工具调用由服务器解析为标准 `tool_calls`。顶栏�
 
 仓库配置了 GitHub Actions（`.github/workflows/android-build.yml`）：凡改动
 Android 工程或 `llama.cpp-omni` 子模块指针的 push 都会自动编译 debug APK（含
-NDK 原生库），在 Actions 运行页下载即可安装测试。
+NDK 原生库），并自动发布到仓库 **Releases** 页的滚动预览版 `ci-android-debug`；
+签名已固定（共享 debug keystore），`adb install -r` 可直接覆盖升级。
 
 ### 1.3 HarmonyOS Demo
 

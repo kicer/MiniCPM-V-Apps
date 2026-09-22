@@ -157,7 +157,9 @@ Notes:
 
 A GitHub Actions workflow (`.github/workflows/android-build.yml`) builds the
 debug APK (NDK native libs included) on every push that touches the Android
-app or the `llama.cpp-omni` submodule; download it from the run summary.
+app or the `llama.cpp-omni` submodule. The latest build is auto-published to
+the repo's **Releases** page as a rolling prerelease (`ci-android-debug`),
+signed with a fixed debug key so `adb install -r` always works.
 
 ### 1.3 HarmonyOS Demo
 
