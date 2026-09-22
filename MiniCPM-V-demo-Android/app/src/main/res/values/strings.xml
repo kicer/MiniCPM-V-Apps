@@ -183,7 +183,7 @@
     <string name="relay_status_connecting">relay 连接中</string>
     <string name="relay_settings_title">中转服务设置</string>
     <string name="relay_settings_url">中转地址（wss://…，留空用默认）</string>
-    <string name="relay_settings_token">Token（服务器开启鉴权时必填，留空不携带）</string>
+    <string name="relay_settings_token">Token（首次自动生成，需加入服务器白名单）</string>
     <string name="relay_settings_invalid_url">地址需以 ws:// 或 wss:// 开头</string>
     <string name="tts_model_load_failed">模型加载失败</string>
     <string name="tts_preset_load_failed">加载预设失败: %1$s</string>

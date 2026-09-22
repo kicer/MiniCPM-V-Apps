@@ -141,10 +141,11 @@ OpenAI-style `inference` requests forwarded from H5 agents, runs them fully
 on-device, and streams raw text back as `chunk` messages; the server parses
 MiniCPM5 XML tool calls into standard `tool_calls`. The toolbar shows a
 `relay connected / relay connecting` badge; tap it to open the **Relay
-settings** dialog where the relay URL and auth token can be configured. The
-token is carried in the `register` message and must match one of the
-whitelisted entries in the server's `auth.tokens` (leave it empty while the
-server runs with `auth.enabled: false`).
+settings** dialog where the relay URL can be overridden and the auth token
+viewed/copied. The token is **auto-generated on first launch** (persisted
+afterwards) and is carried in the `register` message; once the server enables
+`auth.enabled: true`, add this token to the server's `auth.tokens` whitelist
+(while auth is disabled the server ignores the field).
 
 Notes:
 

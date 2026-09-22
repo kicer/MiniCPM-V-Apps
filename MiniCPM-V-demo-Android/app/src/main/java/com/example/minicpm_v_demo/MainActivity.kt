@@ -419,7 +419,7 @@ class MainActivity : AppCompatActivity() {
         }
         val etToken = EditText(this).apply {
             hint = getString(R.string.relay_settings_token)
-            setText(RelayClient.relayToken(ctx) ?: "")
+            setText(RelayClient.relayToken(ctx))
             inputType = InputType.TYPE_CLASS_TEXT
             isSingleLine = true
         }

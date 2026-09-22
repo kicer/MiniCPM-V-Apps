@@ -180,7 +180,7 @@
     <string name="relay_status_connecting">relay connecting</string>
     <string name="relay_settings_title">Relay settings</string>
     <string name="relay_settings_url">Relay URL (wss://…, empty = default)</string>
-    <string name="relay_settings_token">Token (required when server auth is on; empty = none)</string>
+    <string name="relay_settings_token">Token (auto-generated on first launch; add to server whitelist)</string>
     <string name="relay_settings_invalid_url">URL must start with ws:// or wss://</string>
     <string name="tts_model_load_failed">Model loading failed</string>
     <string name="tts_preset_load_failed">Failed to load preset: %1$s</string>

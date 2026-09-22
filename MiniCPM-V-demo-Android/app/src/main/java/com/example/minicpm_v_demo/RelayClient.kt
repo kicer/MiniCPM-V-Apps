@@ -47,7 +47,8 @@ object RelayClient {
     /** 中转服务器默认地址（HTTP 侧为 https://llm-relay.ai.foresh.com），设置后可被 relay_url 覆盖。 */
     const val RELAY_WS_URL = "wss://llm-relay.ai.foresh.com/ws"
 
-    /** 鉴权 token 配置：服务器白名单模式下 register 携带；空 = 不发（兼容 auth.enabled:false）。 */
+    /** 鉴权 token 配置：首次使用自动生成并持久化，register 始终携带；
+     *  服务器开 auth.enabled 时需在 auth.tokens 白名单登记同一个值。 */
     private const val RELAY_PREFS = "relay_prefs"
     private const val KEY_RELAY_URL = "relay_url"
     private const val KEY_RELAY_TOKEN = "relay_token"
@@ -73,9 +74,25 @@ object RelayClient {
         prefs(context).getString(KEY_RELAY_URL, null)?.trim()?.takeIf { it.isNotEmpty() }
             ?: RELAY_WS_URL
 
-    /** 设置里的鉴权 token；空白返回 null（register 不带 token，兼容未开鉴权的服务器）。 */
-    fun relayToken(context: Context): String? =
-        prefs(context).getString(KEY_RELAY_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
+    /**
+     * 鉴权 token：首次使用自动生成 `sk-<32位hex>` 并持久化，不会为空。
+     * 服务器开启 auth.enabled 时，把本值（点顶栏 relay 角标可查看/复制）
+     * 加入服务器 auth.tokens 白名单；auth.enabled:false 时服务器忽略该字段。
+     */
+    fun relayToken(context: Context): String {
+        val saved = prefs(context).getString(KEY_RELAY_TOKEN, null)?.trim()
+        if (!saved.isNullOrEmpty()) return saved
+        val generated = generateToken()
+        prefs(context).edit().putString(KEY_RELAY_TOKEN, generated).apply()
+        Log.i(TAG, "Generated initial relay token; add it to the server's auth.tokens whitelist")
+        return generated
+    }
+
+    private fun generateToken(): String {
+        val bytes = ByteArray(16)
+        java.security.SecureRandom().nextBytes(bytes)
+        return "sk-" + bytes.joinToString("") { "%02x".format(it) }
+    }
 
     /** 保存用户在中转设置弹窗里改的 url/token；调用方需 stop() + start() 使其生效。 */
     fun saveConfig(context: Context, url: String, token: String) {
@@ -202,9 +219,9 @@ object RelayClient {
                         .put("type", "register")
                         .put("device_id", deviceId(ctx))
                         .put("model", registeredModelName ?: "")
-                    // 服务器开启 token 白名单鉴权时，未带合法 token 的连接会被直接
-                    // 关闭（不返回 registered）；token 留空则兼容 auth.enabled:false。
-                    relayToken(ctx)?.let { register.put("token", it) }
+                    // token 首次使用自动生成并持久化；服务器开鉴权时需在
+                    // auth.tokens 白名单里登记同一个值，未登记会被直接关闭。
+                    register.put("token", relayToken(ctx))
                     rawSend(register)
                 }
 
