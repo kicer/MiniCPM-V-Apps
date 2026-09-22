@@ -5,11 +5,14 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -172,6 +175,9 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, ModelManagerActivity::class.java))
         }
         btnImageSlice.setOnClickListener { showImageSliceDialog() }
+
+        // 点击顶栏 relay 徽章可修改中转地址 / token。
+        tvRelayStatus.setOnClickListener { showRelaySettingsDialog() }
 
         etInput.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) {
@@ -394,6 +400,56 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /** 中转设置弹窗：自定义 llm-relay 地址与鉴权 token，保存后自动重连。 */
+    private fun showRelaySettingsDialog() {
+        val ctx = applicationContext
+        val hPad = (24 * resources.displayMetrics.density).toInt()
+        val vPad = (8 * resources.displayMetrics.density).toInt()
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(hPad, vPad * 2, hPad, 0)
+        }
+        val etUrl = EditText(this).apply {
+            hint = getString(R.string.relay_settings_url)
+            setText(RelayClient.relayUrl(ctx))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            isSingleLine = true
+        }
+        val etToken = EditText(this).apply {
+            hint = getString(R.string.relay_settings_token)
+            setText(RelayClient.relayToken(ctx) ?: "")
+            inputType = InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+        }
+        layout.addView(etUrl)
+        layout.addView(etToken)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.relay_settings_title)
+            .setView(layout)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNegativeButton(R.string.cancel, null)
+            .create()
+        // 自己接管 OK 按钮：校验通过才关闭弹窗，避免填坏 URL 后徽章消失无法重进设置。
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val url = etUrl.text.toString().trim()
+                if (url.isNotEmpty() && !url.startsWith("ws://") && !url.startsWith("wss://")) {
+                    etUrl.error = getString(R.string.relay_settings_invalid_url)
+                    return@setOnClickListener
+                }
+                val token = etToken.text.toString().trim()
+                RelayClient.saveConfig(ctx, url, token)
+                dialog.dismiss()
+                if (isModelReady && ::engine.isInitialized) {
+                    RelayClient.stop()
+                    RelayClient.start(applicationContext, engine)
+                }
+            }
+        }
+        dialog.show()
     }
 
     private fun refreshWelcomeCard(isTextOnly: Boolean) {

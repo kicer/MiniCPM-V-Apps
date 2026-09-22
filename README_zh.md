@@ -138,7 +138,9 @@ Android Demo 在模型加载完成后，会自动与 llm-relay 中转服务器
 WebSocket 长连接：手机上报设备 ID 与当前模型名完成注册，接收服务器转发的
 OpenAI 格式 `inference` 请求，在端侧完成推理并以 `chunk` 流式回传原始文本，
 MiniCPM5 的 XML 工具调用由服务器解析为标准 `tool_calls`。顶栏会显示
-「relay 已连接 / relay 连接中」状态角标。
+「relay 已连接 / relay 连接中」状态角标，点击可打开**中转服务设置**，
+自定义中转地址并填写鉴权 token；token 会随 `register` 消息上报，需与服务
+器 `auth.tokens` 白名单中某一项一致（服务器 `auth.enabled: false` 时可留空）。
 
 注意：
 

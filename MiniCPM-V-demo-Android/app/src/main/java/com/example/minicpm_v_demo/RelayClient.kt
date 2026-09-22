@@ -44,8 +44,13 @@ object RelayClient {
 
     private const val TAG = "RelayClient"
 
-    /** 中转服务器地址（HTTP 侧为 https://llm-relay.ai.foresh.com）。 */
+    /** 中转服务器默认地址（HTTP 侧为 https://llm-relay.ai.foresh.com），设置后可被 relay_url 覆盖。 */
     const val RELAY_WS_URL = "wss://llm-relay.ai.foresh.com/ws"
+
+    /** 鉴权 token 配置：服务器白名单模式下 register 携带；空 = 不发（兼容 auth.enabled:false）。 */
+    private const val RELAY_PREFS = "relay_prefs"
+    private const val KEY_RELAY_URL = "relay_url"
+    private const val KEY_RELAY_TOKEN = "relay_token"
 
     /** 应用层心跳：服务器按消息计时，超过 idle_timeout_ms 判离线。 */
     private const val PING_INTERVAL_MS = 10_000L
@@ -59,6 +64,26 @@ object RelayClient {
 
     private val _status = MutableStateFlow(Status.Disconnected)
     val status: StateFlow<Status> = _status.asStateFlow()
+
+    private fun prefs(context: Context) =
+        context.getSharedPreferences(RELAY_PREFS, Context.MODE_PRIVATE)
+
+    /** 实际生效的中转地址：设置值优先，留空 = 用内置默认地址。 */
+    fun relayUrl(context: Context): String =
+        prefs(context).getString(KEY_RELAY_URL, null)?.trim()?.takeIf { it.isNotEmpty() }
+            ?: RELAY_WS_URL
+
+    /** 设置里的鉴权 token；空白返回 null（register 不带 token，兼容未开鉴权的服务器）。 */
+    fun relayToken(context: Context): String? =
+        prefs(context).getString(KEY_RELAY_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }
+
+    /** 保存用户在中转设置弹窗里改的 url/token；调用方需 stop() + start() 使其生效。 */
+    fun saveConfig(context: Context, url: String, token: String) {
+        prefs(context).edit()
+            .putString(KEY_RELAY_URL, url.trim())
+            .putString(KEY_RELAY_TOKEN, token.trim())
+            .apply()
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -78,6 +103,10 @@ object RelayClient {
     @Volatile
     private var registeredModelName: String? = null
 
+    /** 当前连接所用的地址，用于检测设置里改了 URL 后自动重连。 */
+    @Volatile
+    private var activeUrl: String? = null
+
     @Volatile
     private var reconnectDelayMs = RECONNECT_MIN_MS
 
@@ -96,16 +125,18 @@ object RelayClient {
 
     /**
      * 幂等启动。模型加载完成（[LlamaState.ModelReady]）后调用；
-     * 若选中的模型发生变化会自动断开重连并以新模型名重新注册。
+     * 选中的模型或中转设置（url/token）发生变化时会自动断开重连并
+     * 以新模型名 / 新 token 重新注册。
      */
     @Synchronized
     fun start(context: Context, engine: LlamaEngine) {
         appContext = context.applicationContext
         this.engine = engine
         val modelName = relayModelName(context)
+        val url = relayUrl(context)
 
-        if (running && registeredModelName != modelName) {
-            // 模型切换：关掉旧连接，重新注册
+        if (running && (registeredModelName != modelName || activeUrl != url)) {
+            // 模型 / 中转地址变更：关掉旧连接，重新注册
             shutDownSocket()
             running = false
             registeredModelName = null
@@ -113,6 +144,7 @@ object RelayClient {
         if (running) return
         running = true
         registeredModelName = modelName
+        activeUrl = url
         generation++
         reconnectDelayMs = RECONNECT_MIN_MS
         connectOnce(generation)
@@ -124,6 +156,7 @@ object RelayClient {
         running = false
         generation++
         registeredModelName = null
+        activeUrl = null
         everRegistered = false
         if (inflightRequestId != null) {
             engine?.cancelGeneration()
@@ -147,45 +180,56 @@ object RelayClient {
 
     private fun connectOnce(gen: Int) {
         val ctx = appContext ?: return
+        val url = activeUrl ?: RELAY_WS_URL
         _status.value = if (everRegistered) Status.Reconnecting else Status.Connecting
 
-        val client = object : WebSocketClient(URI(RELAY_WS_URL)) {
-            init {
-                // 库级 TCP 保活探测；应用层另有 {"type":"ping"} 心跳。
-                connectionLostTimeout = 45
-            }
+        val client = try {
+            object : WebSocketClient(URI(url)) {
+                init {
+                    // 库级 TCP 保活探测；应用层另有 {"type":"ping"} 心跳。
+                    connectionLostTimeout = 45
+                }
 
-            override fun onSetSSLParameters(sslParameters: SSLParameters?) {
-                // 强制 HTTPS 域名校验，防中间人替换 wss 证书。
-                sslParameters?.endpointIdentificationAlgorithm = "HTTPS"
-            }
+                override fun onSetSSLParameters(sslParameters: SSLParameters?) {
+                    // 强制 HTTPS 域名校验，防中间人替换 wss 证书。
+                    sslParameters?.endpointIdentificationAlgorithm = "HTTPS"
+                }
 
-            override fun onOpen(handshakedata: ServerHandshake?) {
-                if (gen != generation) return
-                Log.i(TAG, "Relay WS connected, registering as '$registeredModelName'")
-                val register = JSONObject()
-                    .put("type", "register")
-                    .put("device_id", deviceId(ctx))
-                    .put("model", registeredModelName ?: "")
-                rawSend(register)
-            }
+                override fun onOpen(handshakedata: ServerHandshake?) {
+                    if (gen != generation) return
+                    Log.i(TAG, "Relay WS connected, registering as '$registeredModelName'")
+                    val register = JSONObject()
+                        .put("type", "register")
+                        .put("device_id", deviceId(ctx))
+                        .put("model", registeredModelName ?: "")
+                    // 服务器开启 token 白名单鉴权时，未带合法 token 的连接会被直接
+                    // 关闭（不返回 registered）；token 留空则兼容 auth.enabled:false。
+                    relayToken(ctx)?.let { register.put("token", it) }
+                    rawSend(register)
+                }
 
-            override fun onMessage(message: String?) {
-                if (gen != generation || message.isNullOrEmpty()) return
-                handleServerMessage(message)
-            }
+                override fun onMessage(message: String?) {
+                    if (gen != generation || message.isNullOrEmpty()) return
+                    handleServerMessage(message)
+                }
 
-            override fun onClose(code: Int, reason: String?, remote: Boolean) {
-                if (gen != generation) return
-                Log.w(TAG, "Relay WS closed (code=$code, reason=$reason, remote=$remote)")
-                scheduleReconnect(gen)
-            }
+                override fun onClose(code: Int, reason: String?, remote: Boolean) {
+                    if (gen != generation) return
+                    Log.w(TAG, "Relay WS closed (code=$code, reason=$reason, remote=$remote)")
+                    scheduleReconnect(gen)
+                }
 
-            override fun onError(ex: Exception?) {
-                if (gen != generation) return
-                Log.w(TAG, "Relay WS error", ex)
-                // Java-WebSocket 会在 error 后继续回调 onClose，重连由 onClose 统一触发。
+                override fun onError(ex: Exception?) {
+                    if (gen != generation) return
+                    Log.w(TAG, "Relay WS error", ex)
+                    // Java-WebSocket 会在 error 后继续回调 onClose，重连由 onClose 统一触发。
+                }
             }
+        } catch (e: Exception) {
+            // 用户在设置里填了非法 URL 等：不崩溃，按重连节奏等待下次 start()。
+            Log.e(TAG, "Invalid relay URL '$url'", e)
+            _status.value = Status.Disconnected
+            return
         }
 
         socket = client
