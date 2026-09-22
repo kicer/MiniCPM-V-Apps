@@ -321,6 +321,18 @@ class LlamaEngine private constructor(
             else                     -> 0
         }
 
+        // Explicit n_ctx override pushed to native via setNctxHintNative
+        // before prepare().  0 = let native auto-pick (V-4.6 -> 8192 video
+        // budget, everything else -> 4096).
+        // MiniCPM5 text models never load an mmproj, so they never reach the
+        // version-based auto logic and would be stuck at 4096; 8192 gives the
+        // llm-relay flat prompt (system + tools schema + history) a usable
+        // window, with q8_0 KV cache halving the extra memory natively.
+        fun nctxHintFor(model: ModelInfo): Int = when (model.id) {
+            "minicpm5-0.9b", "minicpm5-2b" -> 8192
+            else -> 0
+        }
+
         // Per-file source descriptor used by [downloadFileMultiSource] / racing.
         private data class FileSource(val label: String, val url: URL)
 
@@ -897,6 +909,7 @@ class LlamaEngine private constructor(
     // logic see the right value.  Required since upstream master mtmd
     // dropped mtmd_get_minicpmv_version().  See LlamaEngine.loadModel.
     private external fun setMinicpmvVersionNative(version: Int)
+    private external fun setNctxHintNative(n: Int)
     // MiniCPM5 / V-4.6 thinking toggle. Default off.
     private external fun setEnableThinkingNative(enable: Boolean)
     // 0 if no mmproj is loaded.  46 / 460 / 461 = MiniCPM-V-4.6 family.
@@ -994,6 +1007,10 @@ class LlamaEngine private constructor(
                         }
                     }
                 }
+
+                // Per-model context budget (MiniCPM5 -> 8192). Must be set
+                // before prepare() which consumes it.
+                setNctxHintNative(nctxHintFor(getSelectedModel(context)))
 
                 prepare().let {
                     if (it != 0) throw RuntimeException("Failed to prepare resources (code: $it)")
