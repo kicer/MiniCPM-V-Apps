@@ -333,6 +333,19 @@ class LlamaEngine private constructor(
             else -> 0
         }
 
+        // Mirrors llama_jni.cpp prepare(): explicit hint wins, else V-4.6
+        // auto-bumps to 8192, everything else stays at 4096.  Used by
+        // [RelayClient] to reject over-long prompts BEFORE touching the
+        // engine (an over-capacity prompt would otherwise land the llama
+        // context in a partial/failed state and require a model reload).
+        // Keep in lockstep with DEFAULT_CONTEXT_SIZE / V46_CONTEXT_SIZE.
+        fun effectiveContextSize(model: ModelInfo): Int =
+            nctxHintFor(model).takeIf { it > 0 }
+                ?: when (model.id) {
+                    "minicpm-v-4_6-instruct" -> 8192
+                    else -> 4096
+                }
+
         // Per-file source descriptor used by [downloadFileMultiSource] / racing.
         private data class FileSource(val label: String, val url: URL)
 
@@ -1076,7 +1089,12 @@ class LlamaEngine private constructor(
             processSystemPrompt(prompt).let { result ->
                 if (result != 0) {
                     RuntimeException("Failed to process system prompt: $result").also {
-                        _state.value = LlamaState.Error(it)
+                        // Park back at ModelReady rather than Error: the
+                        // native call fails before/within decode without
+                        // corrupting the llama runtime, so the next request
+                        // can proceed after a reset. Error would freeze the
+                        // UI until a manual model reload.
+                        _state.value = LlamaState.ModelReady
                         throw it
                     }
                 }
@@ -1212,6 +1230,7 @@ class LlamaEngine private constructor(
             processUserPrompt(message, predictLength).let { result ->
                 if (result != 0) {
                     Log.e(TAG, "Failed to process user prompt: $result")
+                    _state.value = LlamaState.ModelReady
                     return@flow
                 }
             }
