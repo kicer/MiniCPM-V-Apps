@@ -67,6 +67,10 @@ class MainActivity : AppCompatActivity() {
     private var createdWithLocale: String? = null
     private var isLocaleRestart = false
 
+    /** 当前 relay（H5）回复对应的 AI 气泡；流式增量持续 append 到这里。 */
+    private var relayAiMsgId: Long? = null
+    private val relayAiBuffer = StringBuilder()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         createdWithLocale = LocaleManager.currentLanguage(this).tag
@@ -105,6 +109,7 @@ class MainActivity : AppCompatActivity() {
         setupRecyclerView()
         setupClickListeners()
         observeRelayStatus()
+        observeRelayEvents()
         initEngine()
     }
 
@@ -339,6 +344,75 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * relay 流量上屏：H5 发来的消息以用户气泡展示，端侧流式回复以 AI 气泡
+     * 展示（与回传服务器的 chunk 同源）。引擎互斥锁保证与本地聊天串行，
+     * 所以这里可以复用 chatAdapter 的 active-streaming 通道。
+     */
+    private fun observeRelayEvents() {
+        lifecycleScope.launch {
+            RelayClient.uiEvents.collect { ev ->
+                when (ev) {
+                    is RelayClient.UiEvent.UserIncoming -> {
+                        messages.add(
+                            ChatMessage.UserMessage(
+                                id = messageIdCounter++,
+                                text = ev.text,
+                                imageBitmap = null,
+                                imageInfo = null
+                            )
+                        )
+                        val aiId = messageIdCounter++
+                        relayAiMsgId = aiId
+                        relayAiBuffer.setLength(0)
+                        messages.add(ChatMessage.AiMessage(id = aiId, text = "", isGenerating = true))
+                        chatAdapter.setActiveAiMessage(aiId)
+                        collapseAppBar()
+                        chatAdapter.submitList(messages.toList()) { scrollToBottom() }
+                    }
+
+                    is RelayClient.UiEvent.AiChunk -> {
+                        val aiId = relayAiMsgId ?: return@collect
+                        relayAiBuffer.append(ev.text)
+                        val current = relayAiBuffer.toString()
+                        val index = messages.indexOfFirst { it.id == aiId }
+                        if (index >= 0) {
+                            messages[index] = ChatMessage.AiMessage(
+                                id = aiId, text = current, isGenerating = true
+                            )
+                        }
+                        // DiffCallback 在 isGenerating 时会忽略 text 变化，
+                        // 流式更新必须走 updateStreamingText（本地聊天同款路径）。
+                        chatAdapter.updateStreamingText(aiId, current)
+                        scrollToBottom()
+                    }
+
+                    is RelayClient.UiEvent.AiFinished -> finishRelayAi(null)
+                    is RelayClient.UiEvent.AiError -> finishRelayAi(ev.message)
+                }
+            }
+        }
+    }
+
+    private fun finishRelayAi(errorMessage: String?) {
+        val aiId = relayAiMsgId ?: return
+        relayAiMsgId = null
+        var text = relayAiBuffer.toString()
+        text = when {
+            text.isEmpty() -> errorMessage?.let { "\u26a0\ufe0f $it" } ?: "(empty)"
+            errorMessage != null -> "$text\n\n\u26a0\ufe0f $errorMessage"
+            else -> text
+        }
+        val index = messages.indexOfFirst { it.id == aiId }
+        if (index >= 0) {
+            messages[index] = ChatMessage.AiMessage(id = aiId, text = text, isGenerating = false)
+        }
+        chatAdapter.setGeneratingDone(aiId)
+        chatAdapter.clearActiveAiMessage()
+        chatAdapter.submitList(messages.toList())
+        scrollToBottom()
     }
 
     private fun enableInput(enable: Boolean) {

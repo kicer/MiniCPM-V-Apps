@@ -8,7 +8,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
@@ -65,6 +67,22 @@ object RelayClient {
 
     private val _status = MutableStateFlow(Status.Disconnected)
     val status: StateFlow<Status> = _status.asStateFlow()
+
+    /** relay 流量上屏事件：聊天页（MainActivity）同步展示 H5 的消息与回复。 */
+    sealed class UiEvent {
+        /** H5 侧最新一条非 system 消息，作为用户消息展示。 */
+        data class UserIncoming(val text: String) : UiEvent()
+        /** 流式生成增量文本（与回传给服务器的 chunk 同源）。 */
+        data class AiChunk(val text: String) : UiEvent()
+        /** 本轮正常结束（含被服务器 cancel）。 */
+        object AiFinished : UiEvent()
+        /** 本轮失败；UI 侧据此收起气泡并展示错误。 */
+        data class AiError(val message: String) : UiEvent()
+    }
+
+    // tryEmit 只入队不阻塞生成线程；无 UI 收集者（如在模型管理页）时事件自然丢弃。
+    private val _uiEvents = MutableSharedFlow<UiEvent>(extraBufferCapacity = 512)
+    val uiEvents: SharedFlow<UiEvent> = _uiEvents.asSharedFlow()
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(RELAY_PREFS, Context.MODE_PRIVATE)
@@ -357,6 +375,9 @@ object RelayClient {
                 val predictLength = params?.optInt("max_tokens", LlamaEngine.DEFAULT_PREDICT_LENGTH)
                     ?.coerceIn(1, 4096) ?: LlamaEngine.DEFAULT_PREDICT_LENGTH
 
+                // 上屏：H5 发来的最新消息以用户消息展示，并预先挂出生成中的 AI 气泡。
+                lastIncomingText(messages)?.let { _uiEvents.tryEmit(UiEvent.UserIncoming(it)) }
+
                 // 无状态执行：重置上下文 →（可选）system → 单条扁平 user prompt
                 eng.clearContext()
                 if (!systemPrompt.isNullOrBlank()) {
@@ -367,23 +388,32 @@ object RelayClient {
                     if (inflightRequestId != requestId) return@collect // 已被 stop()/cancel 接管
                     buffer.append(token)
                     if (buffer.length >= CHUNK_FLUSH_CHARS) {
-                        sendChunk(requestId, buffer.toString())
+                        val chunk = buffer.toString()
+                        sendChunk(requestId, chunk)
+                        _uiEvents.tryEmit(UiEvent.AiChunk(chunk))
                         buffer.setLength(0)
                     }
                 }
                 if (buffer.isNotEmpty()) {
-                    sendChunk(requestId, buffer.toString())
+                    val chunk = buffer.toString()
+                    sendChunk(requestId, chunk)
+                    _uiEvents.tryEmit(UiEvent.AiChunk(chunk))
                     buffer.setLength(0)
                 }
                 sendDone(requestId)
+                _uiEvents.tryEmit(UiEvent.AiFinished)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Relay inference $requestId failed", e)
             if (buffer.isNotEmpty()) {
-                // 尽量保留已生成的部分，再报错，便于 H5 侧观察
-                sendChunk(requestId, buffer.toString())
+                // 尽量保留已生成的部分，再报错，便于 H5 侧与 UI 观察
+                val chunk = buffer.toString()
+                sendChunk(requestId, chunk)
+                _uiEvents.tryEmit(UiEvent.AiChunk(chunk))
             }
-            sendError(requestId, e.message ?: e.javaClass.simpleName)
+            val em = e.message ?: e.javaClass.simpleName
+            sendError(requestId, em)
+            _uiEvents.tryEmit(UiEvent.AiError(em))
         } finally {
             if (inflightRequestId == requestId) inflightRequestId = null
         }
@@ -464,6 +494,18 @@ object RelayClient {
             appendLine("现在请针对下面这条最新消息，以助手身份继续回复：")
             appendLine("${last.first}: ${last.second}")
         }
+    }
+
+    /** 除 system 外最后一条消息的原文，仅用于聊天页上屏展示。 */
+    private fun lastIncomingText(messages: JSONArray): String? {
+        var last: String? = null
+        for (i in 0 until messages.length()) {
+            val m = messages.optJSONObject(i) ?: continue
+            if (m.optString("role") == "system") continue
+            val t = contentText(m.opt("content"))
+            if (t.isNotBlank()) last = t
+        }
+        return last
     }
 
     /** OpenAI content 兼容 string / 多模态数组两种形态；图片等非文本部分跳过。 */

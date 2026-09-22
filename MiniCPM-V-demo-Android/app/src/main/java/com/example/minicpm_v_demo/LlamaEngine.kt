@@ -1059,7 +1059,11 @@ class LlamaEngine private constructor(
             processSystemPrompt(prompt).let { result ->
                 if (result != 0) {
                     RuntimeException("Failed to process system prompt: $result").also {
-                        _state.value = LlamaState.Error(it)
+                        // Park at ModelReady rather than Error: a rejected/failed
+                        // prompt must not freeze the UI until a manual model
+                        // reload.  The next request resets via clearContext
+                        // anyway.  Relay surfaces the failure per-request.
+                        _state.value = LlamaState.ModelReady
                         throw it
                     }
                 }
@@ -1195,6 +1199,10 @@ class LlamaEngine private constructor(
             processUserPrompt(message, predictLength).let { result ->
                 if (result != 0) {
                     Log.e(TAG, "Failed to process user prompt: $result")
+                    // Same rationale as setSystemPrompt: don't strand the
+                    // engine in ProcessingUserPrompt (which blocks every
+                    // state-checked call until a model reload).
+                    _state.value = LlamaState.ModelReady
                     return@flow
                 }
             }
