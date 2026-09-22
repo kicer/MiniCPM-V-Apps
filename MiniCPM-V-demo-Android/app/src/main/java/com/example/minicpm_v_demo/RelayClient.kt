@@ -61,9 +61,6 @@ object RelayClient {
     private const val RECONNECT_MIN_MS = 2_000L
     private const val RECONNECT_MAX_MS = 30_000L
 
-    /** chunk 缓冲阈值：攒够这些字符（或生成结束）再发一帧，减少 WS 噪声。 */
-    private const val CHUNK_FLUSH_CHARS = 96
-
     enum class Status { Disconnected, Connecting, Connected, Reconnecting }
 
     private val _status = MutableStateFlow(Status.Disconnected)
@@ -349,7 +346,6 @@ object RelayClient {
         val requestId = msg.optString("request_id")
         if (requestId.isEmpty()) return
 
-        val buffer = StringBuilder()
         inflightRequestId = requestId
         try {
             // 与本地聊天共用单 llama context，串行化整轮推理。
@@ -387,31 +383,18 @@ object RelayClient {
 
                 eng.sendUserPrompt(userPrompt, predictLength).collect { token ->
                     if (inflightRequestId != requestId) return@collect // 已被 stop()/cancel 接管
-                    buffer.append(token)
-                    if (buffer.length >= CHUNK_FLUSH_CHARS) {
-                        val chunk = buffer.toString()
-                        sendChunk(requestId, chunk)
-                        _uiEvents.tryEmit(UiEvent.AiChunk(chunk))
-                        buffer.setLength(0)
-                    }
-                }
-                if (buffer.isNotEmpty()) {
-                    val chunk = buffer.toString()
-                    sendChunk(requestId, chunk)
-                    _uiEvents.tryEmit(UiEvent.AiChunk(chunk))
-                    buffer.setLength(0)
+                    // 逐 token 直发：与 OpenAI SSE 的 delta 粒度一致。手机端
+                    // 生成约 10~20 tok/s，WS 每秒十几条小帧开销可忽略，
+                    // H5 和本地 UI 两端都能拿到流畅的逐字效果。
+                    sendChunk(requestId, token)
+                    _uiEvents.tryEmit(UiEvent.AiChunk(token))
                 }
                 sendDone(requestId)
                 _uiEvents.tryEmit(UiEvent.AiFinished)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Relay inference $requestId failed", e)
-            if (buffer.isNotEmpty()) {
-                // 尽量保留已生成的部分，再报错，便于 H5 侧与 UI 观察
-                val chunk = buffer.toString()
-                sendChunk(requestId, chunk)
-                _uiEvents.tryEmit(UiEvent.AiChunk(chunk))
-            }
+            // 已逐 token 发出，无需再补发残留缓冲
             val em = e.message ?: e.javaClass.simpleName
             sendError(requestId, em)
             _uiEvents.tryEmit(UiEvent.AiError(em))
