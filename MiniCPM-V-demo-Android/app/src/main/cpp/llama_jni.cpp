@@ -58,13 +58,6 @@ static mtmd_context                     * g_ctx_vision;
 // 46/460/461 = V-4.6 (instruct/thinking)
 static int                                g_minicpmv_version = 0;
 
-// Explicit n_ctx override pushed down by Kotlin (setNctxHintNative) before
-// prepare(). 0 = fall back to the model-family auto logic in prepare().
-// Needed because text-only models (MiniCPM5) never load an mmproj, so
-// g_minicpmv_version stays 0 and would otherwise lock them to 4096 — too
-// small for the llm-relay flat prompt (system + tools schema + history).
-static int                                g_nctx_hint = 0;
-
 // Most recent slice cap requested by the upper layer.  Persists across
 // loadMmproj calls so a user-chosen value survives e.g. an unload/reload
 // of the model.  Initial fallback = 9 (MiniCPM-V's built-in upper bound)
@@ -222,17 +215,6 @@ Java_com_example_minicpm_1v_1demo_LlamaEngine_setMinicpmvVersionNative(JNIEnv * 
     LOGi("%s: minicpmv_version set to %d", __func__, g_minicpmv_version);
 }
 
-// Kotlin-driven explicit context-size override.  Takes effect in the next
-// prepare(); 0 restores the automatic per-family choice.
-extern "C"
-JNIEXPORT void JNICALL
-Java_com_example_minicpm_1v_1demo_LlamaEngine_setNctxHintNative(JNIEnv * /*env*/,
-                                                                jobject,
-                                                                jint jnctx) {
-    g_nctx_hint = (int) jnctx;
-    LOGi("%s: n_ctx hint set to %d", __func__, g_nctx_hint);
-}
-
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_example_minicpm_1v_1demo_LlamaEngine_setImageMaxSliceNumsNative(JNIEnv * /*env*/,
@@ -275,15 +257,6 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = N_THREADS;
     ctx_params.n_threads_batch = N_THREADS;
-    if (n_ctx > DEFAULT_CONTEXT_SIZE) {
-        // Larger contexts would double KV-cache memory at f16; q8_0 halves
-        // it with a negligible quality cost for chat.  CPU attention picks
-        // the dequant path automatically (no flash-attn requirement).
-        ctx_params.type_k = GGML_TYPE_Q8_0;
-        ctx_params.type_v = GGML_TYPE_Q8_0;
-        LOGi("%s: n_ctx=%d > %d -> KV cache quantised to q8_0",
-             __func__, n_ctx, DEFAULT_CONTEXT_SIZE);
-    }
     auto *context = llama_init_from_model(g_model, ctx_params);
     if (context == nullptr) {
         LOGe("%s: llama_new_context_with_model() returned null)", __func__);
@@ -307,22 +280,15 @@ static common_sampler *new_sampler(float temp) {
 extern "C"
 JNIEXPORT jint JNICALL
 Java_com_example_minicpm_1v_1demo_LlamaEngine_prepare(JNIEnv * /*env*/, jobject /*unused*/) {
-    // Priority: explicit Kotlin hint > model-family auto logic.
-    // MiniCPM5 (text-only, no mmproj -> version stays 0) needs more than
-    // 4096 for llm-relay prompts; Kotlin passes 8192 via setNctxHintNative.
-    // The V-4.6 branch below is the historical video-understanding bump
-    // (iOS parity: MTMDParams.nCtx = 8192 on V46MultiModel only).
-    int n_ctx;
-    if (g_nctx_hint > 0) {
-        n_ctx = g_nctx_hint;
-        LOGi("%s: using Kotlin n_ctx hint %d", __func__, n_ctx);
-    } else {
-        const bool is_v46 = (g_minicpmv_version == 46) ||
-                            (g_minicpmv_version == 460) ||
-                            (g_minicpmv_version == 461);
-        n_ctx = is_v46 ? V46_CONTEXT_SIZE : DEFAULT_CONTEXT_SIZE;
-        LOGi("%s: minicpmv_version=%d -> n_ctx=%d", __func__, g_minicpmv_version, n_ctx);
-    }
+    // MiniCPM-V-4.6 video understanding (up to 64 frames per turn) needs
+    // a larger KV budget than the 4096 default; everything else stays at
+    // 4096 to keep memory pressure low on older / non-vision models.
+    // Matches the iOS demo's MTMDParams.nCtx = 8192 on V46MultiModel.
+    const bool is_v46 = (g_minicpmv_version == 46) ||
+                        (g_minicpmv_version == 460) ||
+                        (g_minicpmv_version == 461);
+    const int  n_ctx  = is_v46 ? V46_CONTEXT_SIZE : DEFAULT_CONTEXT_SIZE;
+    LOGi("%s: minicpmv_version=%d -> n_ctx=%d", __func__, g_minicpmv_version, n_ctx);
 
     auto *context = init_context(g_model, n_ctx);
     if (!context) { return 1; }
@@ -593,7 +559,7 @@ Java_com_example_minicpm_1v_1demo_LlamaEngine_fullReset(JNIEnv *, jobject) {
     llama_free(g_context);
     g_context = nullptr;
 
-    auto *context = init_context(g_model, g_n_ctx);
+    auto *context = init_context(g_model);
     if (!context) {
         LOGe("%s: Failed to reinitialize context!", __func__);
         return;

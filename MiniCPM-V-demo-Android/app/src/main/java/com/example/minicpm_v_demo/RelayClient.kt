@@ -357,26 +357,6 @@ object RelayClient {
                 val predictLength = params?.optInt("max_tokens", LlamaEngine.DEFAULT_PREDICT_LENGTH)
                     ?.coerceIn(1, 4096) ?: LlamaEngine.DEFAULT_PREDICT_LENGTH
 
-                // 预检：prompt + 生成预算超出上下文窗口时直接拒绝本单
-                // （OpenAI 风格 error 经服务器透传给 H5），绝不让溢出走到
-                // native：processSystemPrompt 超容会留下半解码的 context，
-                // 之前表现为“设备卡死需重载模型”。
-                val app = appContext
-                if (app != null) {
-                    val budget =
-                        LlamaEngine.effectiveContextSize(LlamaEngine.getSelectedModel(app)) -
-                            predictLength - 32
-                    val estTokens = estimateTokens(systemPrompt ?: "") + estimateTokens(userPrompt)
-                    if (estTokens > budget) {
-                        Log.w(TAG, "Relay $requestId rejected: est $estTokens tokens > budget $budget")
-                        sendError(
-                            requestId,
-                            "prompt exceeds context window (estimated $estTokens tokens > budget $budget)"
-                        )
-                        return@withLock
-                    }
-                }
-
                 // 无状态执行：重置上下文 →（可选）system → 单条扁平 user prompt
                 eng.clearContext()
                 if (!systemPrompt.isNullOrBlank()) {
@@ -484,22 +464,6 @@ object RelayClient {
             appendLine("现在请针对下面这条最新消息，以助手身份继续回复：")
             appendLine("${last.first}: ${last.second}")
         }
-    }
-
-    /**
-     * 粗估 token 数：CJK ≈ 1.1 tok/字，其余（ASCII/JSON schema）≈ 0.35 tok/字符，
-     * 另加模板开销。故意偏保守：宁可误拒也不让溢出漏到 native。
-     */
-    private fun estimateTokens(text: String): Int {
-        if (text.isEmpty()) return 0
-        var cjk = 0
-        for (ch in text) {
-            val cp = ch.code
-            if ((cp in 0x3000..0x303F) || (cp in 0x3400..0x4DBF) || (cp in 0x4E00..0x9FFF) ||
-                (cp in 0xAC00..0xD7AF) || (cp in 0xF900..0xFAFF) || (cp in 0xFF00..0xFFEF)
-            ) cjk++
-        }
-        return (cjk * 1.1 + (text.length - cjk) * 0.35).toInt() + 8
     }
 
     /** OpenAI content 兼容 string / 多模态数组两种形态；图片等非文本部分跳过。 */
